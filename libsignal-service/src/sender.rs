@@ -34,8 +34,8 @@ pub struct OutgoingPushMessage {
 }
 
 #[derive(serde::Serialize, Debug)]
-pub struct OutgoingPushMessages<'a> {
-    pub destination: &'a str,
+pub struct OutgoingPushMessages {
+    pub destination: String,
     pub timestamp: u64,
     pub messages: Vec<OutgoingPushMessage>,
     pub online: bool,
@@ -51,9 +51,9 @@ pub type SendMessageResult = Result<SentMessage, MessageSenderError>;
 
 #[derive(Debug, Clone)]
 pub struct SentMessage {
-    recipient: ServiceAddress,
-    unidentified: bool,
-    needs_sync: bool,
+    pub(crate) recipient: ServiceAddress,
+    pub(crate) unidentified: bool,
+    pub(crate) needs_sync: bool,
 }
 
 /// Attachment specification to be used for uploading.
@@ -78,9 +78,9 @@ pub struct MessageSender<Service, S, I, SP, P, R> {
     service: Service,
     cipher: ServiceCipher<S, I, SP, P, R>,
     csprng: R,
-    session_store: S,
+    pub(crate) session_store: S,
     identity_key_store: I,
-    local_address: ServiceAddress,
+    pub(crate) local_address: ServiceAddress,
     device_id: u32,
 }
 
@@ -95,7 +95,7 @@ pub enum AttachmentUploadError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum MessageSenderError {
-    #[error("{0}")]
+    #[error(transparent)]
     ServiceError(#[from] ServiceError),
     #[error("protocol error: {0}")]
     ProtocolError(#[from] SignalProtocolError),
@@ -345,17 +345,16 @@ where
                 Ok(SentMessage { needs_sync, .. }),
             ) if *needs_sync => {
                 log::debug!("sending multi-device sync message");
-                let sync_message = self
-                    .create_multi_device_sent_transcript_content(
-                        Some(&recipient),
-                        Some(message.clone()),
-                        timestamp,
-                        &results,
-                    );
+                let sync_message = create_multi_device_sent_transcript_content(
+                    Some(&recipient),
+                    Some(message.clone()),
+                    timestamp,
+                    &results,
+                );
                 self.try_send_message(
                     (&self.local_address).clone(),
                     None,
-                    &sync_message,
+                    &sync_message.into(),
                     timestamp,
                     false,
                 )
@@ -416,19 +415,18 @@ where
 
         // we only need to send a synchronization message once
         if needs_sync_in_results {
-            let sync_message = self
-                .create_multi_device_sent_transcript_content(
-                    None,
-                    Some(message.clone()),
-                    timestamp,
-                    &results,
-                );
+            let sync_message = create_multi_device_sent_transcript_content(
+                None,
+                Some(message.clone()),
+                timestamp,
+                &results,
+            );
 
             let result = self
                 .try_send_message(
                     self.local_address.clone(),
                     unidentified_access,
-                    &sync_message,
+                    &sync_message.into(),
                     timestamp,
                     false,
                 )
@@ -458,12 +456,16 @@ where
 
         for _ in 0..4u8 {
             let messages = self
-                .create_encrypted_messages(&recipient, None, &content_bytes)
+                .create_encrypted_messages(
+                    &recipient,
+                    unidentified_access,
+                    &content_bytes,
+                )
                 .await?;
 
             let destination = recipient.identifier();
             let messages = OutgoingPushMessages {
-                destination: &destination,
+                destination,
                 timestamp,
                 messages,
                 online,
@@ -637,10 +639,10 @@ where
     }
 
     // Equivalent with `getEncryptedMessages`
-    async fn create_encrypted_messages(
+    pub async fn create_encrypted_messages(
         &mut self,
         recipient: &ServiceAddress,
-        unidentified_access: Option<UnidentifiedAccess>,
+        unidentified_access: Option<&UnidentifiedAccess>,
         content: &[u8],
     ) -> Result<Vec<OutgoingPushMessage>, MessageSenderError> {
         let mut messages = vec![];
@@ -651,7 +653,7 @@ where
             messages.push(
                 self.create_encrypted_message(
                     recipient,
-                    unidentified_access.as_ref(),
+                    unidentified_access,
                     DEFAULT_DEVICE_ID,
                     content,
                 )
@@ -673,7 +675,7 @@ where
                 messages.push(
                     self.create_encrypted_message(
                         recipient,
-                        unidentified_access.as_ref(),
+                        unidentified_access,
                         device_id,
                         content,
                     )
@@ -745,44 +747,43 @@ where
             .await?;
         Ok(message)
     }
+}
 
-    fn create_multi_device_sent_transcript_content(
-        &self,
-        recipient: Option<&ServiceAddress>,
-        data_message: Option<crate::proto::DataMessage>,
-        timestamp: u64,
-        send_message_results: &[SendMessageResult],
-    ) -> ContentBody {
-        use sync_message::sent::UnidentifiedDeliveryStatus;
-        let unidentified_status: Vec<UnidentifiedDeliveryStatus> =
-            send_message_results
-                .iter()
-                .filter_map(|result| result.as_ref().ok())
-                .map(|sent| {
-                    let SentMessage {
-                        recipient,
-                        unidentified,
-                        ..
-                    } = sent;
-                    UnidentifiedDeliveryStatus {
-                        destination_e164: recipient.e164(),
-                        destination_uuid: recipient.uuid.map(|s| s.to_string()),
-                        unidentified: Some(*unidentified),
-                    }
-                })
-                .collect();
-        ContentBody::SynchronizeMessage(SyncMessage {
-            sent: Some(sync_message::Sent {
-                destination_uuid: recipient
-                    .and_then(|r| r.uuid)
-                    .map(|u| u.to_string()),
-                destination_e164: recipient.and_then(|r| r.e164()),
-                message: data_message,
-                timestamp: Some(timestamp),
-                unidentified_status,
-                ..Default::default()
-            }),
+pub fn create_multi_device_sent_transcript_content(
+    recipient: Option<&ServiceAddress>,
+    data_message: Option<crate::proto::DataMessage>,
+    timestamp: u64,
+    send_message_results: &[SendMessageResult],
+) -> SyncMessage {
+    use sync_message::sent::UnidentifiedDeliveryStatus;
+    let unidentified_status: Vec<UnidentifiedDeliveryStatus> =
+        send_message_results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .map(|sent| {
+                let SentMessage {
+                    recipient,
+                    unidentified,
+                    ..
+                } = sent;
+                UnidentifiedDeliveryStatus {
+                    destination_e164: recipient.e164(),
+                    destination_uuid: recipient.uuid.map(|s| s.to_string()),
+                    unidentified: Some(*unidentified),
+                }
+            })
+            .collect();
+    SyncMessage {
+        sent: Some(sync_message::Sent {
+            destination_uuid: recipient
+                .and_then(|r| r.uuid)
+                .map(|u| u.to_string()),
+            destination_e164: recipient.and_then(|r| r.e164()),
+            message: data_message,
+            timestamp: Some(timestamp),
+            unidentified_status,
             ..Default::default()
-        })
+        }),
+        ..Default::default()
     }
 }

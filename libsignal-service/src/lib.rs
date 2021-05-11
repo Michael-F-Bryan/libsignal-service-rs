@@ -55,7 +55,7 @@ pub mod prelude {
         },
         push_service::{PushService, ServiceError},
         receiver::MessageReceiver,
-        sender::{MessageSender, MessageSenderError},
+        sender::{MessageSender, MessageSenderError, OutgoingPushMessages},
     };
     pub use phonenumber;
     pub use prost::Message as ProtobufMessage;
